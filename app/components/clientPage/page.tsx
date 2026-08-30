@@ -1,359 +1,492 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { supabase } from "../../lib/supabase";
 
 type Client = {
-  id: number;
+  id: string;
   name: string;
-  address: string;
+  google_maps_url: string;
+  position: number;
 };
 
-const clients: Client[] = [
-  {
-    id: 1,
-    name: "Auto Parts AB",
-    address: "Göteborgsvägen 12, Göteborg",
-  },
-  {
-    id: 2,
-    name: "Eriksson Bil",
-    address: "Storgatan 25, Göteborg",
-  },
-  {
-    id: 3,
-    name: "Göteborgs Bildelar",
-    address: "Industrigatan 8, Göteborg",
-  },
-  {
-    id: 4,
-    name: "Nordic Car Parts",
-    address: "Exportgatan 15, Göteborg",
-  },
-  {
-    id: 5,
-    name: "Svenska Bilservice",
-    address: "Mölndalsvägen 42, Göteborg",
-  },
-  {
-    id: 6,
-    name: "Mekonomen",
-    address: "Backavägen 20, Göteborg",
-  },
-  {
-    id: 7,
-    name: "BilXtra",
-    address: "Ringögatan 12, Göteborg",
-  },
-  {
-    id: 8,
-    name: "Carfix",
-    address: "Hisingen 14, Göteborg",
-  },
-];
+type RouteStop = {
+  id: string;
+  client_id: string;
+  position: number;
+  status: "pending" | "completed";
+};
 
-export default function Dashboard() {
-  const [page, setPage] = useState<"clients" | "route">("clients");
+export default function ClientPage() {
+  const [clients, setClients] = useState<Client[]>([]);
+  const [routeStops, setRouteStops] = useState<RouteStop[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const [selectedClients, setSelectedClients] = useState<number[]>([]);
+  // =========================================================
+  // LOAD DATA
+  // =========================================================
 
-  const [completedClients, setCompletedClients] = useState<number[]>([]);
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
 
-  const toggleClient = (id: number) => {
-    setSelectedClients((current) =>
-      current.includes(id)
-        ? current.filter((clientId) => clientId !== id)
-        : [...current, id],
+        // -----------------------------
+        // LOAD CLIENTS
+        // -----------------------------
+
+        const { data: clientsData, error: clientsError } = await supabase
+          .from("clients")
+          .select("id, name, google_maps_url, position")
+          .order("position", {
+            ascending: true,
+          });
+
+        if (clientsError) {
+          throw clientsError;
+        }
+
+        setClients(clientsData || []);
+
+        // -----------------------------
+        // LOAD TODAY'S ROUTE
+        // -----------------------------
+
+        const today = new Date().toLocaleDateString("sv-SE");
+
+        const { data: routes, error: routeError } = await supabase
+          .from("routes")
+          .select("id")
+          .eq("route_date", today)
+          .order("created_at", {
+            ascending: true,
+          })
+          .limit(1);
+
+        if (routeError) {
+          throw routeError;
+        }
+
+        const route = routes?.[0];
+
+        // Немає маршруту — це нормально.
+        // Нічого не створюємо.
+        if (!route) {
+          setRouteStops([]);
+          return;
+        }
+
+        // -----------------------------
+        // LOAD ROUTE STOPS
+        // -----------------------------
+
+        const { data: stops, error: stopsError } = await supabase
+          .from("route_stops")
+          .select("id, client_id, position, status")
+          .eq("route_id", route.id)
+          .order("position", {
+            ascending: true,
+          });
+
+        if (stopsError) {
+          throw stopsError;
+        }
+
+        setRouteStops(stops || []);
+      } catch (err) {
+        console.error("LOAD DATA ERROR:", err);
+
+        setError(
+          err instanceof Error ? err.message : "Не вдалося завантажити дані",
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  // =========================================================
+  // ADD CLIENT TO ROUTE
+  // =========================================================
+
+  const addToRoute = async (clientId: string) => {
+    try {
+      setAddingId(clientId);
+      setError(null);
+
+      const today = new Date().toLocaleDateString("sv-SE");
+
+      // -----------------------------------------------------
+      // 1. ЗНАХОДИМО СЬОГОДНІШНІЙ МАРШРУТ
+      // -----------------------------------------------------
+
+      const { data: existingRoutes, error: findRouteError } = await supabase
+        .from("routes")
+        .select("id")
+        .eq("route_date", today)
+        .order("created_at", {
+          ascending: true,
+        })
+        .limit(1);
+
+      if (findRouteError) {
+        throw findRouteError;
+      }
+
+      let routeId = existingRoutes?.[0]?.id;
+
+      // -----------------------------------------------------
+      // 2. ЯКЩО МАРШРУТУ НЕМАЄ — СТВОРЮЄМО
+      // -----------------------------------------------------
+
+      if (!routeId) {
+        const { data: newRoute, error: createRouteError } = await supabase
+          .from("routes")
+          .upsert(
+            {
+              route_date: today,
+              status: "planned",
+            },
+            {
+              onConflict: "route_date",
+              ignoreDuplicates: true,
+            },
+          )
+          .select("id")
+          .maybeSingle();
+
+        if (createRouteError) {
+          throw createRouteError;
+        }
+
+        routeId = newRoute?.id;
+
+        // upsert з ignoreDuplicates може
+        // нічого не повернути — тоді знаходимо
+        // вже існуючий маршрут
+        if (!routeId) {
+          const { data: routeAfterUpsert, error: routeAfterUpsertError } =
+            await supabase
+              .from("routes")
+              .select("id")
+              .eq("route_date", today)
+              .single();
+
+          if (routeAfterUpsertError) {
+            throw routeAfterUpsertError;
+          }
+
+          routeId = routeAfterUpsert.id;
+        }
+      }
+
+      // -----------------------------------------------------
+      // 3. ПЕРЕВІРЯЄМО ЧИ КЛІЄНТ ВЖЕ Є
+      // -----------------------------------------------------
+
+      const { data: existingStop, error: existingStopError } = await supabase
+        .from("route_stops")
+        .select("id, client_id, position, status")
+        .eq("route_id", routeId)
+        .eq("client_id", clientId)
+        .maybeSingle();
+
+      if (existingStopError) {
+        throw existingStopError;
+      }
+
+      // Вже є — нічого не робимо
+      if (existingStop) {
+        setRouteStops((current) => {
+          const exists = current.some((stop) => stop.id === existingStop.id);
+
+          if (exists) {
+            return current;
+          }
+
+          return [...current, existingStop];
+        });
+
+        return;
+      }
+
+      // -----------------------------------------------------
+      // 4. ЗНАХОДИМО НАСТУПНУ ПОЗИЦІЮ
+      // -----------------------------------------------------
+
+      const { error: lastStopError } = await supabase
+        .from("route_stops")
+        .select("position")
+        .eq("route_id", routeId)
+        .order("position", {
+          ascending: false,
+        })
+        .limit(1)
+        .maybeSingle();
+
+      if (lastStopError) {
+        throw lastStopError;
+      }
+
+      const client = clients.find((item) => item.id === clientId);
+
+      if (!client) {
+        throw new Error("Клієнт не знайдений");
+      }
+
+      // -----------------------------------------------------
+      // 5. ДОДАЄМО КЛІЄНТА
+      // -----------------------------------------------------
+
+      const { data: newStop, error: addStopError } = await supabase
+        .from("route_stops")
+        .insert({
+          route_id: routeId,
+          client_id: clientId,
+          position: client.position,
+          status: "pending",
+          completed_at: null,
+        })
+        .select("id, client_id, position, status")
+        .single();
+
+      if (addStopError) {
+        throw addStopError;
+      }
+
+      // -----------------------------------------------------
+      // 6. ОНОВЛЮЄМО UI
+      // -----------------------------------------------------
+
+      setRouteStops((current) => [...current, newStop]);
+    } catch (err) {
+      console.error("ADD TO ROUTE ERROR:", err);
+
+      setError(
+        err instanceof Error ? err.message : "Не вдалося додати клієнта",
+      );
+    } finally {
+      setAddingId(null);
+    }
+  };
+
+  // =========================================================
+  // REMOVE CLIENT FROM ROUTE
+  // =========================================================
+
+  const removeFromRoute = async (clientId: string) => {
+    try {
+      const stop = routeStops.find((item) => item.client_id === clientId);
+
+      if (!stop) {
+        return;
+      }
+
+      const { error } = await supabase
+        .from("route_stops")
+        .delete()
+        .eq("id", stop.id);
+
+      if (error) {
+        throw error;
+      }
+
+      setRouteStops((current) =>
+        current
+          .filter((item) => item.id !== stop.id)
+          .map((item, index) => ({
+            ...item,
+            position: index + 1,
+          })),
+      );
+    } catch (err) {
+      console.error("REMOVE FROM ROUTE ERROR:", err);
+
+      setError(
+        err instanceof Error ? err.message : "Не вдалося видалити клієнта",
+      );
+    }
+  };
+
+  // =========================================================
+  // LOADING
+  // =========================================================
+
+  if (loading) {
+    return (
+      <main className="min-h-screen bg-gray-100">
+        <div className="mx-auto min-h-screen w-full max-w-120 bg-white p-5">
+          <div className="flex min-h-[80vh] items-center justify-center text-gray-500">
+            Завантаження...
+          </div>
+        </div>
+      </main>
     );
-  };
+  }
 
-  const toggleCompleted = (id: number) => {
-    setCompletedClients((current) =>
-      current.includes(id)
-        ? current.filter((clientId) => clientId !== id)
-        : [...current, id],
-    );
-  };
-
-  const routeClients = selectedClients
-    .map((id) => clients.find((client) => client.id === id))
-    .filter(Boolean) as Client[];
-
-  const openLocation = (address: string) => {
-    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-      address,
-    )}`;
-
-    window.open(url, "_blank");
-  };
+  // =========================================================
+  // MAIN
+  // =========================================================
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      <main className="mx-auto min-h-screen w-full max-w-[480px] bg-white pb-20">
+    <main className="min-h-screen bg-gray-100">
+      <div className="mx-auto min-h-screen w-full max-w-120 bg-white pb-20">
         {/* HEADER */}
+
         <header className="border-b border-gray-200 px-4 py-5">
-          {page === "clients" ? (
-            <>
-              <div className="flex items-center justify-between">
-                <div>
-                  <h1 className="text-2xl font-bold text-gray-900">Клієнти</h1>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">Клієнти</h1>
 
-                  <p className="mt-1 text-sm text-gray-500">
-                    Оберіть клієнтів для маршруту
-                  </p>
-                </div>
+              <p className="mt-1 text-sm text-gray-500">
+                Всього: {clients.length}
+              </p>
+            </div>
 
-                {selectedClients.length > 0 && (
-                  <div className="rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold">
-                    {selectedClients.length}
-                  </div>
-                )}
+            {routeStops.length > 0 && (
+              <div className="flex h-10 min-w-10 items-center justify-center rounded-full bg-green-100 px-3 text-sm font-bold text-green-700">
+                {routeStops.length}
               </div>
-            </>
-          ) : (
-            <>
-              <div className="flex items-center justify-between">
-                <div>
-                  <h1 className="text-2xl font-bold text-gray-900">
-                    Мій маршрут
-                  </h1>
-
-                  <p className="mt-1 text-sm text-gray-500">
-                    {routeClients.length}{" "}
-                    {routeClients.length === 1 ? "точка" : "точок"}
-                  </p>
-                </div>
-
-                {routeClients.length > 0 && (
-                  <div className="rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold">
-                    {
-                      completedClients.filter((id) =>
-                        selectedClients.includes(id),
-                      ).length
-                    }
-                    /{routeClients.length}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
+            )}
+          </div>
         </header>
 
-        {/* CONTENT */}
+        {/* ERROR */}
+
+        {error && (
+          <div className="mx-4 mt-4 rounded-xl bg-red-50 p-4 text-sm text-red-600">
+            {error}
+          </div>
+        )}
+
+        {/* CLIENT LIST */}
+
         <section className="px-4 py-4">
-          {page === "clients" ? (
-            /* ---------------- CLIENTS ---------------- */
+          {clients.length === 0 ? (
+            <div className="py-16 text-center">
+              <div className="text-5xl">👥</div>
+
+              <h2 className="mt-4 text-lg font-semibold text-gray-900">
+                Клієнтів немає
+              </h2>
+            </div>
+          ) : (
             <div className="space-y-2">
               {clients.map((client) => {
-                const isSelected = selectedClients.includes(client.id);
+                const stop = routeStops.find(
+                  (item) => item.client_id === client.id,
+                );
+
+                const selected = !!stop;
+
+                const adding = addingId === client.id;
 
                 return (
                   <div
                     key={client.id}
-                    className={`flex min-h-[64px] items-center justify-between gap-3 rounded-xl border px-4 py-3 transition ${
-                      isSelected
-                        ? "border-green-200 bg-green-50"
-                        : "border-gray-200 bg-white"
-                    }`}
+                    className={`
+                      flex
+                      items-center
+                      gap-3
+                      rounded-xl
+                      border
+                      px-4
+                      py-3
+                      transition
+                      ${
+                        selected
+                          ? "border-green-200 bg-green-50"
+                          : "border-gray-200 bg-white"
+                      }
+                    `}
                   >
-                    <span
-                      className={`text-base font-medium ${
-                        isSelected ? "text-green-800" : "text-gray-900"
-                      }`}
-                    >
-                      {client.name}
-                    </span>
-
-                    <button
-                      onClick={() => toggleClient(client.id)}
-                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition active:scale-90 ${
-                        isSelected
-                          ? "bg-green-500 text-white"
-                          : "bg-gray-100 text-gray-600"
-                      }`}
-                    >
-                      {isSelected ? (
-                        <svg
-                          width="22"
-                          height="22"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="3"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M20 6L9 17l-5-5" />
-                        </svg>
-                      ) : (
-                        <svg
-                          width="22"
-                          height="22"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                        >
-                          <path d="M12 5v14" />
-                          <path d="M5 12h14" />
-                        </svg>
-                      )}
-                    </button>
+                    {/* CLIENT NAME */}{" "}
+                    <div className="min-w-0 flex-1">
+                      {" "}
+                      <p
+                        className={` truncate text-base font-semibold ${selected ? "text-green-800" : "text-gray-900"} `}
+                      >
+                        {" "}
+                        {client.name}{" "}
+                      </p>{" "}
+                      {selected && (
+                        <p className="mt-0.5 text-xs text-green-600">
+                          {" "}
+                          №{" "}
+                          {routeStops
+                            .slice()
+                            .sort((a, b) => a.position - b.position)
+                            .findIndex((stop) => stop.client_id === client.id) +
+                            1}{" "}
+                          у маршруті{" "}
+                        </p>
+                      )}{" "}
+                    </div>
+                    {/* BUTTON */}
+                    {selected ? (
+                      <button
+                        type="button"
+                        onClick={() => removeFromRoute(client.id)}
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-green-500 text-xl font-bold text-white transition active:scale-95"
+                        aria-label="Видалити з маршруту"
+                      >
+                        ✓
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => addToRoute(client.id)}
+                        disabled={adding}
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gray-900 text-2xl font-light text-white transition active:scale-95 disabled:opacity-50"
+                        aria-label="Додати до маршруту"
+                      >
+                        {adding ? "…" : "+"}
+                      </button>
+                    )}
                   </div>
                 );
               })}
             </div>
-          ) : (
-            /* ---------------- ROUTE ---------------- */
-            <>
-              {routeClients.length === 0 ? (
-                <div className="flex flex-col items-center justify-center px-6 py-20 text-center">
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100 text-2xl">
-                    🚚
-                  </div>
-
-                  <h2 className="text-lg font-semibold text-gray-900">
-                    Маршрут порожній
-                  </h2>
-
-                  <p className="mt-2 text-sm text-gray-500">
-                    Перейдіть у «Клієнти» та додайте точки до маршруту.
-                  </p>
-
-                  <button
-                    onClick={() => setPage("clients")}
-                    className="mt-5 rounded-xl bg-black px-5 py-3 text-sm font-medium text-white"
-                  >
-                    Перейти до клієнтів
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {routeClients.map((client, index) => {
-                    const isCompleted = completedClients.includes(client.id);
-
-                    return (
-                      <div
-                        key={client.id}
-                        className={`rounded-xl border p-4 transition ${
-                          isCompleted
-                            ? "border-green-200 bg-green-50"
-                            : "border-gray-200 bg-white"
-                        }`}
-                      >
-                        {/* Client name */}
-                        <div className="flex items-center gap-3">
-                          <div
-                            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
-                              isCompleted
-                                ? "bg-green-500 text-white"
-                                : "bg-gray-100 text-gray-700"
-                            }`}
-                          >
-                            {isCompleted ? "✓" : index + 1}
-                          </div>
-
-                          <span
-                            className={`font-semibold ${
-                              isCompleted
-                                ? "text-green-800 line-through"
-                                : "text-gray-900"
-                            }`}
-                          >
-                            {client.name}
-                          </span>
-                        </div>
-
-                        {/* Buttons */}
-                        {!isCompleted ? (
-                          <div className="mt-4 grid grid-cols-2 gap-2">
-                            <button
-                              onClick={() => openLocation(client.address)}
-                              className="flex h-12 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-gray-50 text-sm font-medium text-gray-800 active:scale-[0.98]"
-                            >
-                              <span>📍</span>
-                              Розташування
-                            </button>
-
-                            <button
-                              onClick={() => toggleCompleted(client.id)}
-                              className="flex h-12 items-center justify-center gap-2 rounded-xl bg-green-500 text-sm font-medium text-white active:scale-[0.98]"
-                            >
-                              <span>✓</span>
-                              Виконано
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => toggleCompleted(client.id)}
-                            className="mt-4 h-11 w-full rounded-xl border border-green-200 bg-white text-sm font-medium text-green-700"
-                          >
-                            Скасувати виконання
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
           )}
         </section>
 
         {/* BOTTOM NAVIGATION */}
-        <nav className="fixed bottom-0 left-1/2 z-50 w-full max-w-[480px] -translate-x-1/2 border-t border-gray-200 bg-white">
+
+        <nav className="fixed bottom-0 left-1/2 z-50 w-full max-w-120 -translate-x-1/2 border-t border-gray-200 bg-white">
           <div className="grid grid-cols-2">
             {/* CLIENTS */}
-            <button
-              onClick={() => setPage("clients")}
-              className={`flex h-16 flex-col items-center justify-center gap-1 text-xs font-medium transition ${
-                page === "clients" ? "text-black" : "text-gray-400"
-              }`}
+
+            <Link
+              href="/components/clientPage"
+              className="flex h-16 flex-col items-center justify-center gap-1 text-xs font-semibold text-black"
             >
-              <svg
-                width="22"
-                height="22"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-              </svg>
+              <span className="text-xl">👥</span>
               Клієнти
-            </button>
+            </Link>
 
             {/* ROUTE */}
-            <button
-              onClick={() => setPage("route")}
-              className={`relative flex h-16 flex-col items-center justify-center gap-1 text-xs font-medium transition ${
-                page === "route" ? "text-black" : "text-gray-400"
-              }`}
+
+            <Link
+              href="/components/routePage"
+              className="relative flex h-16 flex-col items-center justify-center gap-1 text-xs font-medium text-gray-400"
             >
-              {selectedClients.length > 0 && (
+              {routeStops.length > 0 && (
                 <span className="absolute right-[calc(50%-25px)] top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-green-500 px-1 text-[10px] font-bold text-white">
-                  {selectedClients.length}
+                  {routeStops.length}
                 </span>
               )}
-              <svg
-                width="22"
-                height="22"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M3 17l6-6 4 4 8-8" />
-                <path d="M14 7h7v7" />
-              </svg>
+              <span className="text-xl">🚚</span>
               Маршрут
-            </button>
+            </Link>
           </div>
         </nav>
-      </main>
-    </div>
+      </div>
+    </main>
   );
 }
